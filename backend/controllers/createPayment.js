@@ -1,17 +1,16 @@
-const request = require("request");
+const request = require("request-promise");
 const CryptoJS = require("crypto-js");
-const getHeaders = require("../functions/headers");
-const getRequestData = require("../functions/requestData");
-const getHelpers = require("../functions/helpers");
 const Payment = require("../models/Payment");
 const Transaction = require("../models/Transaction");
 const Wallet = require("../models/Wallet");
 
+const { getHeaders, getRequestData, getHelpers } = require("../functions");
+
 const helpers = getHelpers();
 
-module.exports = function (req, res) {
-  let { amount, customer, ewallet } = req.body;
-  let body = {
+module.exports = async function (req, res) {
+  const { amount, customer, ewallet } = req.body;
+  const body = {
     amount: amount,
     currency: "USD",
     payment_method: "",
@@ -30,20 +29,19 @@ module.exports = function (req, res) {
   const http_method = "post";
   const path = "/v1/payments";
 
-  body = JSON.stringify(body);
+  const bodyString = JSON.stringify(body);
 
-  let to_sign =
+  const toSign =
     http_method +
     path +
     helpers.salt +
     helpers.timestamp +
     helpers.access_key +
     helpers.secret_key +
-    body;
-  let signature = CryptoJS.enc.Hex.stringify(
-    CryptoJS.HmacSHA256(to_sign, helpers.secret_key)
+    bodyString;
+  const signature = CryptoJS.enc.Base64.stringify(
+    CryptoJS.HmacSHA256(toSign, helpers.secret_key)
   );
-  signature = CryptoJS.enc.Base64.stringify(CryptoJS.enc.Utf8.parse(signature));
 
   // Request Details
   const headers = getHeaders(
@@ -52,63 +50,50 @@ module.exports = function (req, res) {
     helpers.salt,
     helpers.timestamp
   );
-  const requestData = getRequestData(headers, uri, http_method, body);
+  const requestData = getRequestData(headers, uri, http_method, bodyString);
 
   // Getting The Current Date
-  let today = new Date();
-  let date =
-    today.getFullYear() + "-" + (today.getMonth() + 1) + "-" + today.getDate();
-  let time =
-    today.getHours() + ":" + today.getMinutes() + ":" + today.getSeconds();
-  let dateTime = date + " " + time;
+  const dateTime = new Date().toISOString();
 
-  /// Request Function
-  request(requestData, async function (err, res, body) {
-    let response = JSON.parse(res.body);
-    console.log(response);
+  try {
+    const response = await request(requestData);
 
-    // Saving The Payment !!!!!!!
+    const parsedResponse = JSON.parse(response);
+
+    // Save Payment
     const newPayment = new Payment({
-      paymentId: response.data.id,
+      paymentId: parsedResponse.data.id,
       customerId: customer,
-      amount: response.data.amount,
+      amount: parsedResponse.data.amount,
       ewallet_id: ewallet,
       created_at: dateTime,
     });
-    // Save
-    newPayment.save();
+    await newPayment.save();
 
-    // New Transaction
-
+    // Save Transaction
     const newTransaction = new Transaction({
-
-      transactionId: response.data.id,
-      amount: response.data.amount,
+      transactionId: parsedResponse.data.id,
+      amount: parsedResponse.data.amount,
       destination_phone_number: "",
       destination_ewallet_id: ewallet,
       source_ewallet_id: customer,
       created_at: dateTime,
     });
-    // Save
-    newTransaction.save();
+    await newTransaction.save();
 
-    // Update the balance of the wallet to which the amount is transfered
-
-    try {
-      // Find the id of the Destination wallet and Update The Balance !!
-      let destinationWalletDetails = await Wallet.findOne({
-        ewallet_id: ewallet.toString(),
-      });
-      Wallet.updateOne(
-        { _id: destinationWalletDetails._id },
-        { balance: destinationWalletDetails.balance + parseInt(amount) }
-      ).then(() => console.log(destinationWalletDetails));
-    } catch (error) {
-      console.error(error);
-    }
+    // Update the balance of the wallet to which the amount is transferred
+    const destinationWalletDetails = await Wallet.findOne({
+      ewallet_id: ewallet.toString(),
+    });
+    await Wallet.updateOne(
+      { _id: destinationWalletDetails._id },
+      { balance: destinationWalletDetails.balance + parseInt(amount) }
+    );
 
     console.log(newPayment + "Added");
-  });
-
-  res.send("Payment Done !!!!");
+    res.send("Payment Done !!!!");
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Server Error" });
+  }
 };
